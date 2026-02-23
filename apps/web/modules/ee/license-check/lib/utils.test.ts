@@ -366,22 +366,15 @@ describe("License Utils", () => {
   });
 
   describe("getIsContactsEnabled", () => {
-    test("should return true if feature flag contacts is true", async () => {
-      vi.mocked(licenseModule.getLicenseFeatures).mockResolvedValue({
-        ...defaultFeatures,
-        contacts: true,
-      });
+    test("should always return true regardless of license state", async () => {
       const result = await getIsContactsEnabled();
       expect(result).toBe(true);
     });
 
-    test("should return false if feature flag contacts is false", async () => {
-      vi.mocked(licenseModule.getLicenseFeatures).mockResolvedValue({
-        ...defaultFeatures,
-        contacts: false,
-      });
+    test("should return true even when license has no features", async () => {
+      vi.mocked(licenseModule.getLicenseFeatures).mockResolvedValue(null);
       const result = await getIsContactsEnabled();
-      expect(result).toBe(false);
+      expect(result).toBe(true);
     });
   });
 

@@ -87,7 +87,7 @@ export const getIsMultiOrgEnabled = async (): Promise<boolean> => {
 };
 
 export const getIsContactsEnabled = async (): Promise<boolean> => {
-  return getSpecificFeatureFlag("contacts");
+  return true;
 };
 
 export const getIsTwoFactorAuthEnabled = async (): Promise<boolean> => {
