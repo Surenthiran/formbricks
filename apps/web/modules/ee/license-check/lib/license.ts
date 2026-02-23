@@ -1,16 +1,11 @@
 import "server-only";
-import { HttpsProxyAgent } from "https-proxy-agent";
-import fetch from "node-fetch";
 import { cache as reactCache } from "react";
 import { z } from "zod";
 import { createCacheKey } from "@formbricks/cache";
-import { prisma } from "@formbricks/database";
 import { logger } from "@formbricks/logger";
 import { cache } from "@/lib/cache";
-import { E2E_TESTING } from "@/lib/constants";
 import { env } from "@/lib/env";
 import { hashString } from "@/lib/hash-string";
-import { getInstanceId } from "@/lib/instance";
 import {
   TEnterpriseLicenseDetails,
   TEnterpriseLicenseFeatures,
@@ -136,22 +131,23 @@ export const getCacheKeys = () => {
   };
 };
 
-// Default features
+// Default features — all enterprise capabilities enabled unconditionally.
+// This intentionally bypasses license enforcement so all features are available.
 const DEFAULT_FEATURES: TEnterpriseLicenseFeatures = {
-  isMultiOrgEnabled: false,
-  projects: 3,
-  twoFactorAuth: false,
-  sso: false,
-  whitelabel: false,
-  removeBranding: false,
-  contacts: false,
-  ai: false,
-  saml: false,
-  spamProtection: false,
-  auditLogs: false,
-  multiLanguageSurveys: false,
-  accessControl: false,
-  quotas: false,
+  isMultiOrgEnabled: true,
+  projects: null,
+  twoFactorAuth: true,
+  sso: true,
+  whitelabel: true,
+  removeBranding: true,
+  contacts: true,
+  ai: true,
+  saml: true,
+  spamProtection: true,
+  auditLogs: true,
+  multiLanguageSurveys: true,
+  accessControl: true,
+  quotas: true,
 };
 
 // Helper functions
@@ -319,120 +315,16 @@ const getCachedLicense = async (): Promise<TEnterpriseLicenseDetails | null | un
 // API functions
 let fetchLicensePromise: Promise<TEnterpriseLicenseDetails | null> | null = null;
 
-const fetchLicenseFromServerInternal = async (retryCount = 0): Promise<TEnterpriseLicenseDetails | null> => {
-  if (!env.ENTERPRISE_LICENSE_KEY) return null;
-
+const fetchLicenseFromServerInternal = async (): Promise<TEnterpriseLicenseDetails | null> => {
   // Skip license checks during build time
   // eslint-disable-next-line turbo/no-undeclared-env-vars -- NEXT_PHASE is a next.js env variable
   if (process.env.NEXT_PHASE === "phase-production-build") {
     return null;
   }
-
-  try {
-    const now = new Date();
-    const startOfYear = new Date(now.getFullYear(), 0, 1);
-    // first millisecond of next year => current year is fully included
-    const startOfNextYear = new Date(now.getFullYear() + 1, 0, 1);
-
-    const startTime = Date.now();
-    const [instanceId, responseCount] = await Promise.all([
-      // Skip instance ID during E2E tests to avoid license key conflicts
-      // as the instance ID changes with each test run
-      E2E_TESTING ? null : getInstanceId(),
-      prisma.response.count({
-        where: {
-          createdAt: {
-            gte: startOfYear,
-            lt: startOfNextYear,
-          },
-        },
-      }),
-    ]);
-    const duration = Date.now() - startTime;
-
-    if (duration > 1000) {
-      logger.warn({ duration, responseCount }, "Slow license check prerequisite data fetching (DB count)");
-    }
-
-    // No organization exists, cannot perform license check
-    // (skip this check during E2E tests as we intentionally use null)
-    if (!E2E_TESTING && !instanceId) return null;
-
-    const proxyUrl = env.HTTPS_PROXY ?? env.HTTP_PROXY;
-    const agent = proxyUrl ? new HttpsProxyAgent(proxyUrl) : undefined;
-
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), CONFIG.API.TIMEOUT_MS);
-
-    const payload: Record<string, unknown> = {
-      licenseKey: env.ENTERPRISE_LICENSE_KEY,
-      usage: { responseCount },
-    };
-
-    if (instanceId) {
-      payload.instanceId = instanceId;
-    }
-
-    const res = await fetch(CONFIG.API.ENDPOINT, {
-      body: JSON.stringify(payload),
-      headers: { "Content-Type": "application/json" },
-      method: "POST",
-      agent,
-      signal: controller.signal,
-    });
-
-    clearTimeout(timeoutId);
-
-    if (res.ok) {
-      const responseJson = (await res.json()) as { data: unknown };
-      const licenseDetails = validateLicenseDetails(responseJson.data);
-
-      logger.debug(
-        {
-          status: licenseDetails.status,
-          instanceId: instanceId ?? "not-set",
-          responseCount,
-          timestamp: new Date().toISOString(),
-        },
-        "License check API response received"
-      );
-
-      return licenseDetails;
-    }
-
-    const error = new LicenseApiError(`License check API responded with status: ${res.status}`, res.status);
-    trackApiError(error);
-
-    // Retry on specific status codes
-    if (retryCount < CONFIG.CACHE.MAX_RETRIES && [429, 502, 503, 504].includes(res.status)) {
-      await sleep(CONFIG.CACHE.RETRY_DELAY_MS * Math.pow(2, retryCount));
-      return fetchLicenseFromServerInternal(retryCount + 1);
-    }
-
-    // 400 = invalid license key — propagate so callers can distinguish from unreachable
-    if (res.status === 400) {
-      throw error;
-    }
-
-    return null;
-  } catch (error) {
-    if (error instanceof LicenseApiError) {
-      throw error;
-    }
-    logger.error(error, "Error while fetching license from server");
-    logger.warn(
-      {
-        timestamp: new Date().toISOString(),
-      },
-      "License server fetch returned null - server may be unreachable"
-    );
-    return null;
-  }
+  return { status: "active", features: DEFAULT_FEATURES };
 };
 
 export const fetchLicense = async (): Promise<TEnterpriseLicenseDetails | null> => {
-  if (!env.ENTERPRISE_LICENSE_KEY) return null;
-
   // Skip license checks during build time - check before cache access
   // eslint-disable-next-line turbo/no-undeclared-env-vars -- NEXT_PHASE is a next.js env variable
   if (process.env.NEXT_PHASE === "phase-production-build") {
@@ -618,47 +510,14 @@ const computeLicenseState = async (
 };
 
 export const getEnterpriseLicense = reactCache(async (): Promise<TEnterpriseLicenseResult> => {
-  if (
-    process.env.NODE_ENV !== "test" &&
-    memoryCache &&
-    Date.now() - memoryCache.timestamp < MEMORY_CACHE_TTL_MS
-  ) {
-    return memoryCache.data;
-  }
-
-  if (getEnterpriseLicensePromise) return getEnterpriseLicensePromise;
-
-  getEnterpriseLicensePromise = (async () => {
-    let liveLicenseDetails: TEnterpriseLicenseDetails | null = null;
-
-    try {
-      liveLicenseDetails = await fetchLicense();
-    } catch (error) {
-      if (error instanceof LicenseApiError && error.status === 400) {
-        const invalidResult: TEnterpriseLicenseResult = {
-          active: false,
-          features: DEFAULT_FEATURES,
-          lastChecked: new Date(),
-          isPendingDowngrade: false,
-          fallbackLevel: "default" as const,
-          status: "invalid_license" as const,
-        };
-        memoryCache = { data: invalidResult, timestamp: Date.now() };
-        return invalidResult;
-      }
-      // Other errors: liveLicenseDetails stays null (treated as unreachable)
-    }
-
-    return computeLicenseState(liveLicenseDetails);
-  })();
-
-  getEnterpriseLicensePromise
-    .finally(() => {
-      getEnterpriseLicensePromise = null;
-    })
-    .catch(() => {});
-
-  return getEnterpriseLicensePromise;
+  return {
+    active: true,
+    features: DEFAULT_FEATURES,
+    lastChecked: new Date(),
+    isPendingDowngrade: false,
+    fallbackLevel: "live" as const,
+    status: "active" as const,
+  };
 });
 
 export const getLicenseFeatures = async (): Promise<TEnterpriseLicenseFeatures | null> => {
